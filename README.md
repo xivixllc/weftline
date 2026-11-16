@@ -5,10 +5,10 @@ and agent mailboxes. It speaks the v3 wire format, so apps already written again
 MIT-licensed v3 SDKs switch to Weftline by changing one base URL. This README covers running
 Weftline for **acadpak.com** on the same Vercel team that hosts the acadpak.com site.
 
-> **Status: specification, not yet built.** This repository holds the deployment design and the
-> [API reference](docs/api/README.md). The server code is being built in five releases (R1 to R5,
-> see [Roadmap](#roadmap)). Commands below that start with `npm run` or `npx weftline` describe
-> the planned tooling and don't work until R1 ships.
+> **Status: early R1 build.** The server code in `src/` implements part of the
+> [API reference](docs/api/README.md). The rest is specification and arrives in releases R1 to R5
+> (see [Roadmap](#roadmap)). Check [What is implemented](#what-is-implemented) before relying on
+> any endpoint.
 
 ## Contents
 
@@ -146,37 +146,30 @@ The full list is in [Configuration](#configuration).
 ```json
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm ci",
   "regions": ["iad1"],
-  "functions": {
-    "api/**/*.ts": { "maxDuration": 300 }
-  },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index" }
-  ],
-  "daemons": {
-    "sync": {
-      "root": "workers/",
-      "entrypoint": "Dockerfile",
-      "instances": { "iad1": 1 },
-      "command": ["node", "dist/sync.js"],
-      "resources": { "requests": { "memory": "2Gi" } },
-      "terminationGracePeriodSeconds": 60
-    },
-    "jobs": {
-      "root": "workers/",
-      "entrypoint": "Dockerfile",
-      "instances": { "iad1": 1 },
-      "command": ["node", "dist/jobs.js"]
-    }
-  }
+  "functions": { "api/index.ts": { "maxDuration": 60 } },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
 }
 ```
 
-- `sync` holds IMAP IDLE connections and pulls provider deltas. Add instances as grants grow;
-  each instance claims a share of grants through Postgres advisory locks.
-- `jobs` runs the pg-boss queue: scheduled sends, webhook delivery and retries, booking
-  reminders.
-- Daemons start only on production deployments while the feature is in beta.
+This sends every request to the API function (`api/index.ts`). The webhook delivery worker is a
+container ([Dockerfile](Dockerfile)) running `node dist/worker.js`. To run it as a Vercel Daemon,
+add the block below to `vercel.json`. The Daemons schema is in beta, so check it against
+[Vercel's Daemons guide](https://vercel.com/kb/guide/vercel-daemons) first:
+
+```json
+"daemons": {
+  "worker": { "root": ".", "entrypoint": "Dockerfile", "instances": { "iad1": 1 } }
+}
+```
+
+- The worker delivers webhooks and retries failures. It needs `DATABASE_URL_UNPOOLED`.
+- Daemons start only on production deployments while the feature is in beta. Any other
+  container host works too.
+- Sync workers (IMAP IDLE, provider deltas) and a job queue for scheduled sends arrive with the
+  provider connectors.
 
 ### 5. Domain
 
@@ -229,7 +222,8 @@ vercel deploy --prod
 | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | for Microsoft | all | Default Microsoft connector |
 | `MICROSOFT_TENANT` | no | all | `common` (default) or your tenant ID |
 | `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET` | no | Functions | Zoom meeting links (R2) |
-| `WEFTLINE_LEGACY_HEADERS` | no | Daemons | `true` also sends webhook headers under the legacy v3 names; default `false` |
+| `WEFTLINE_LEGACY_SIGNATURE_HEADER` | no | Daemons | Extra header name that also carries the webhook signature, for receivers written for older v3 clients; unset by default |
+| `ALLOW_PRIVATE_WEBHOOKS` | no | all | `true` allows `http://` and private-network webhook URLs. Development only; default `false` |
 | `RATE_LIMIT_PER_KEY` | no | Functions | Requests a minute per API key; default `600` |
 | `RATE_LIMIT_PER_GRANT` | no | Functions | Requests a minute per grant; default `120` |
 | `WEBHOOK_MAX_ATTEMPTS` | no | Daemons | Delivery attempts before a webhook delivery is marked failed; default `10` |
@@ -244,7 +238,7 @@ Create the first application and API key against production:
 
 ```bash
 vercel env pull .env.production.local --environment=production
-npx weftline admin bootstrap --name "acadpak" --env-file .env.production.local
+npm run weftline -- admin bootstrap --name "acadpak" --env-file .env.production.local
 # → application_id: app_01JD...
 # → api_key:        wl_live_...   (shown once; store it in the acadpak.com project)
 ```
@@ -370,24 +364,48 @@ Figures as of 2026-11-15, from [Vercel's limits docs](https://vercel.com/docs/fu
 
 ## Local development
 
+Needs Node.js 24. No Docker or database install: with `DATABASE_URL` unset, Weftline uses an
+embedded PostgreSQL (PGlite) stored in `.data/pglite`.
+
 ```bash
-cp .env.example .env.local
-docker compose up -d        # PostgreSQL, GreenMail (test IMAP/SMTP), Radicale (test CalDAV/CardDAV)
 npm ci
-npm run db:migrate
-npm run dev                 # API on http://localhost:3000, workers in the same process
+npm run weftline -- admin bootstrap --name acadpak   # prints an application ID and API key
+npm run dev                                           # API on http://localhost:3000, worker in-process
 ```
 
-Point the v3 SDK at `http://localhost:3000` to run its test suite as the compatibility check:
-see [docs/api/README.md](docs/api/README.md#using-the-existing-v3-sdks).
+```bash
+npm test             # unit, HTTP and SDK-compatibility tests
+npm run typecheck
+```
+
+`tests/sdk-conformance.test.ts` runs the real MIT-licensed v3 SDK against a live Weftline server.
+See [docs/api/README.md](docs/api/README.md#using-the-existing-v3-sdks) to point your own app at it.
+
+## What is implemented
+
+| Area | Status |
+| --- | --- |
+| API keys, rate limiting, error and pagination conventions, `Idempotency-Key` on send | Done |
+| Grants: list, get, update, delete, and `POST /v3/connect/custom` for `weftline` mailboxes | Done |
+| Webhooks: CRUD, challenge handshake, secret rotation, signed delivery, retries, all 51 trigger names accepted | Done (the worker emits grant, message and folder events) |
+| Mailboxes stored by Weftline (`weftline` provider): folders, messages, threads, send between mailboxes in one application | Done |
+| Hosted OAuth sign-in, Google, Microsoft 365, IMAP/SMTP, CalDAV/CardDAV connectors | Not built. `connect/custom` returns `422` for those providers |
+| Mail to outside addresses, attachments, scheduled send, tracking, drafts, signatures, templates | Not built. The send route returns `422` naming the unsupported option |
+| Calendar, contacts, scheduler, notetaker, workflows, admin domains and policies, Pub/Sub channels | Not built |
+| `.truncated` and `.cleaned` webhook variants, redirect URIs, grant access tokens | Not built |
+
+Every other route in [docs/api](docs/api/README.md) is specification only and returns `404`.
 
 ## Security
 
-- Provider access and refresh tokens are encrypted with `TOKEN_ENCRYPTION_KEY` (libsodium
-  secretbox). To rotate it, set the new key, move the old one to `TOKEN_ENCRYPTION_KEY_PREVIOUS`,
-  and run `npx weftline admin reencrypt`.
-- API keys are stored as hashes. A leaked key is revoked in the console or with
-  `npx weftline keys revoke <key_id>`.
+- Stored secrets (grant settings, webhook signing secrets) are encrypted with
+  `TOKEN_ENCRYPTION_KEY` (AES-256-GCM). To rotate it, set the new key and move the old one to
+  `TOKEN_ENCRYPTION_KEY_PREVIOUS`; old values stay readable. A re-encryption command is not
+  built yet, so keep the previous key until every grant has been updated.
+- API keys are stored as SHA-256 hashes. A leaked key is revoked with
+  `npm run weftline -- admin keys revoke <key_id>`.
+- Webhook URLs must be public HTTPS addresses, so a webhook can't be aimed at the server's
+  own network.
 - Webhook secrets rotate with `POST /v3/webhooks/rotate-secret/{webhook_id}`.
 - Hosted sign-in uses OAuth 2.0 with PKCE and a signed `state`.
 - Weftline doesn't hold SOC 2, HIPAA or ISO certifications. Those come from your own audits.

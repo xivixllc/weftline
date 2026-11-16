@@ -4,7 +4,7 @@ Weftline is a self-hosted, unified API for email, calendar, contacts, scheduling
 and agent mailboxes. It speaks the v3 wire format, so the existing MIT-licensed v3 SDKs and CLI
 work against it once you point them at your Weftline base URL.
 
-> **Status: specification.** Weftline is in development. This reference is the contract the
+> **Status: partly implemented.** This reference is the contract the
 > server implements. Every endpoint carries the release that delivers it (R1 to R5). See the
 > [project README](../../README.md#roadmap) for dates.
 
@@ -161,7 +161,7 @@ Operators change the defaults with `RATE_LIMIT_PER_KEY` and `RATE_LIMIT_PER_GRAN
 Weftline signs every webhook body with HMAC-SHA256, using the webhook's secret, and sends the
 hex digest in `X-Weftline-Signature`. Verify it against the **raw** request body before parsing
 JSON. See [webhooks.md](webhooks.md#verifying-signatures). For receivers written for the legacy
-v3 header names, set `WEFTLINE_LEGACY_HEADERS=true` and Weftline also sends those names.
+v3 header names, set `WEFTLINE_LEGACY_SIGNATURE_HEADER` to the header name they expect and Weftline sends the signature under that name too.
 
 ## Using the existing v3 SDKs
 
